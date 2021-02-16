@@ -1,0 +1,299 @@
+---
+title: "Different Models"
+author: "Zhuocheng Lin"
+date: "3/22/2020"
+output: pdf_document
+---
+
+# 1. Packages
+
+``` {r message=FALSE}
+library(tidyverse)
+library(modelr)
+library(caret)
+library(ROSE)
+library(randomForest)
+library(glmnet)
+library(rpart)
+library(BMA)
+```
+
+# 2. Data pre-processing
+## (1) Read data
+```{r cache=TRUE, message=FALSE}
+df <- read_csv("./tidy.csv", col_types = cols(.default = col_character())) %>% 
+  type_convert()
+```
+
+## (2) Specify factors
+```{r}
+df_format <- df %>%
+  mutate(TMC = factor(TMC), Severity = factor(Severity), Year = factor(Year), Wday = factor(Wday)) %>%
+  mutate_if(is.logical, factor) %>%
+  mutate_if(is.character, factor)
+```
+
+## (3) Narrow down to one State
+```{r}
+df_format %>% count(State) %>% arrange(desc(n))
+# choose TX as the target State
+df_TX <- df_format %>% filter(State == "TX") %>% select(-State)
+```
+
+## (4) Remove unuseful variables
+```{r}
+# remove variables with only 1 distinct value 
+df_TX %>% summarise_all(~ n_distinct(.)) %>% 
+  pivot_longer(everything(), names_to = "variable", values_to = "n") %>% filter(n == 1)
+df_TX <- df_TX %>% select(-Turning_Loop)
+```
+
+## (5) Drop weather condition/TMC levels
+```{r message=FALSE, fig.height=15}
+# some Weather_Condition levels only have a few observations
+# which can be a problem when we try to build a model
+df_TX %>% count(Weather_Condition) %>% filter(n < 20) %>% select(Weather_Condition)
+drop_weather <- df_TX %>% count(Weather_Condition) %>% filter(n < 20) %>% select(Weather_Condition)
+drop_weather <- drop_weather$Weather_Condition %>% unlist()
+df_TX <- df_TX %>% filter(!(Weather_Condition %in% drop_weather))
+df_TX <- df_TX %>% mutate(Weather_Condition = factor(Weather_Condition))
+
+# it's the same to TMC
+df_TX %>% count(TMC) %>% filter(n < 10)
+drop_TMC <- df_TX %>% count(TMC) %>% filter(n < 10) %>% select(TMC)
+drop_TMC <- drop_TMC$TMC %>% unlist()
+df_TX <- df_TX %>% filter(!TMC %in% drop_TMC) %>% mutate(TMC = factor(TMC))
+```
+
+## (6) Add new labels
+```{r}
+# group level 3 and 4 together, as "Severe"
+# group level 1 and 2 together, as "Not Severe"
+df_label <- df_TX %>%
+  mutate("Status" = factor(ifelse(Severity == "3" | Severity == "4", "Severe", "Not Severe"), 
+                           levels = c("Not Severe", "Severe")))
+df_label %>% select(Severity, Status)
+```
+## (7) Near Zero-Variance Predictors
+```{r message=FALSE}
+# these variable may become zero-variance when the data are split into subsets
+# remove them
+nzv <- nearZeroVar(df_label, saveMetrics = T)
+nzv[nzv$nzv,]
+nzv_cols <- rownames(nzv[nzv$nzv,])
+df_label <- df_label %>%
+  select(-nzv_cols)
+```
+## (8) Partition
+```{r}
+set.seed(1)
+df_parts <- resample_partition(df_label, c(train = 0.6, valid = 0.2, test = 0.2))
+train <- as_tibble(df_parts$train)
+valid <- as_tibble(df_parts$valid)
+test <- as_tibble(df_parts$test)
+# check Weather_Condition levels / TMC levels
+# train should have more levels than valid and test
+tr <- train %>% select(Weather_Condition) %>% distinct()
+va <- valid %>% select(Weather_Condition) %>% distinct()
+te <- test %>% select(Weather_Condition) %>% distinct()
+setdiff(va, tr)
+setdiff(te, tr)
+
+tr <- train %>% select(TMC) %>% distinct()
+va <- valid %>% select(TMC) %>% distinct()
+te <- test %>% select(TMC) %>% distinct()
+setdiff(va, tr)
+setdiff(te, tr)
+```
+
+## (9) Sampling
+```{r}
+new_train <- ovun.sample(Status ~ ., 
+                         data = train %>% select(-Severity), 
+                         method = "both", p = 0.5, N = 90000)$data %>% as_tibble()
+table(new_train$Status)
+```
+
+# 3. Use different models to fit the data
+## (1) Linear Regression
+```{r}
+new_train_linear <- new_train %>%
+  mutate(Status = as.numeric(recode(Status, "Not Severe" = 0, "Severe" = 1)))
+
+# lm_total <- lm(Status ~ ., data = new_train_linear)
+# step(lm_total)
+# based on the result of step() function, build the models below
+lm_ <- list()
+lm_[[1]] <- lm(Status ~ TMC, data = new_train_linear)
+lm_[[2]] <- lm(Status ~ TMC + Side, data = new_train_linear)
+lm_[[3]] <- lm(Status ~ TMC + Side + Traffic_Signal, data = new_train_linear)
+lm_[[4]] <- lm(Status ~ TMC + Side + Traffic_Signal + Start_Lat, data = new_train_linear)
+lm_[[5]] <- lm(Status ~ TMC + Side + Traffic_Signal + Start_Lat + Hour, data = new_train_linear)
+lm_[[6]] <- lm(Status ~ TMC + Side + Traffic_Signal + Start_Lat + Hour + 
+                 Junction, data = new_train_linear)
+lm_[[7]] <- lm(Status ~ TMC + Side + Traffic_Signal + Start_Lat + Hour + 
+                 Junction + Wday, data = new_train_linear)
+lm_[[8]] <- lm(Status ~ TMC + Side + Traffic_Signal + Start_Lat + Hour + 
+                 Junction + Wday + Distance, data = new_train_linear)
+lm_[[9]] <- lm(Status ~ TMC + Side + Traffic_Signal + Start_Lat + Hour + 
+                 Junction + Wday + Distance + Crossing, data = new_train_linear)
+lm_[[10]] <- lm(Status ~ TMC + Side + Traffic_Signal + Start_Lat + Hour + 
+                  Junction + Wday + Distance + Crossing + Duration, data = new_train_linear)
+lm_[[11]] <- lm(Status ~ TMC + Side + Traffic_Signal + Start_Lat + Hour + 
+                  Junction + Wday + Distance + Crossing + Duration + Year, data = new_train_linear)
+lm_[[12]] <- lm(Status ~ TMC + Side + Traffic_Signal + Start_Lat + Hour + 
+                  Junction + Wday + Distance + Crossing + Duration + Year + 
+                  Start_Lng, data = new_train_linear)
+lm_[[13]] <- lm(Status ~ TMC + Side + Traffic_Signal + Start_Lat + Hour + 
+                  Junction + Wday + Distance + Crossing + Duration + Year + 
+                  Start_Lng + Pressure, data = new_train_linear)
+lm_[[14]] <- lm(Status ~ TMC + Side + Traffic_Signal + Start_Lat + Hour + 
+                  Junction + Wday + Distance + Crossing + Duration + Year + 
+                  Start_Lng + Pressure + Weather_Condition, data = new_train_linear)
+lm_[[15]] <- lm(Status ~ TMC + Side + Traffic_Signal + Start_Lat + Hour + 
+                  Junction + Wday + Distance + Crossing + Duration + Year + 
+                  Start_Lng + Pressure + Weather_Condition + Month, data = new_train_linear)
+lm_[[16]] <- lm(Status ~ TMC + Side + Traffic_Signal + Start_Lat + Hour + 
+                  Junction + Wday + Distance + Crossing + Duration + Year + 
+                  Start_Lng + Pressure + Weather_Condition + Month + Wind_Speed, data = new_train_linear)
+lm_[[17]] <- lm(Status ~ TMC + Side + Traffic_Signal + Start_Lat + Hour + 
+                  Junction + Wday + Distance + Crossing + Duration + Year + 
+                  Start_Lng + Pressure + Weather_Condition + Month + Wind_Speed + Civil_Twilight, data = new_train_linear)
+lm_[[18]] <- lm(Status ~ TMC + Side + Traffic_Signal + Start_Lat + Hour + 
+                  Junction + Wday + Distance + Crossing + Duration + Year + 
+                  Start_Lng + Pressure + Weather_Condition + Month + Wind_Speed + Civil_Twilight + Humidity, data = new_train_linear)
+lm_[[19]] <- lm(Status ~ TMC + Side + Traffic_Signal + Start_Lat + Hour + 
+                  Junction + Wday + Distance + Crossing + Duration + Year + 
+                  Start_Lng + Pressure + Weather_Condition + Month + Wind_Speed + Civil_Twilight + Humidity + Day, data = new_train_linear)
+
+all_rmse = vector(length = 19)
+for (i in 1:19) {
+  all_rmse[i] <- rmse(lm_[[i]], data = new_train_linear)
+}
+
+# choose 15th model as the best
+ggplot(tibble(rmse = all_rmse)) +
+  geom_line(aes(factor(1:19), rmse, group = 1)) +
+  labs(x = "Model",
+       y = "RMSE",
+       title = "RMSE of each model")
+
+# get predictions on valid dataset 
+valid_pred_lm <- valid %>%
+  mutate(Status = as.numeric(recode(Status, "Not Severe" = 0, "Severe" = 1))) %>%
+  add_predictions(lm_[[15]])
+# see the predicted value distribution
+ggplot(valid_pred_lm) +
+  geom_boxplot(aes(x = factor(Status), y = pred)) +
+  labs(x = "Severe?",
+       y = "Pred",
+       title = "The predicted value distribution on each status")
+# choose 0.5 as the boundary
+
+valid_pred_lm <- valid_pred_lm %>%
+  mutate(pred_status = ifelse(pred > 0.5, 1, 0))
+# accuracy
+confusionMatrix(table(valid_pred_lm$pred_status, valid_pred_lm$Status))
+```
+## (2) Logistic Regression
+```{r}
+# BIC best model
+# model_bic <- bic.glm(Status ~ ., data = new_train, glm.family = "binomial")
+# saveRDS(model_bic, "./model_bic.rds")
+model_bic <- readRDS("./model_bic.rds")
+variables <- model_bic$label[1] %>% str_split(pattern = ",") %>% unlist()
+bic_best <- glm(Status ~ ., data = new_train %>% select(variables, Status), family = "binomial")
+
+valid_pred <- valid %>%
+  mutate("lg" = predict(bic_best, newdata = valid, type = "response")) %>%
+  mutate("lg" = ifelse(lg > 0.5, "Severe", "Not Severe"))
+valid_pred %>% select(Status, lg)
+table(valid$Status)
+confusionMatrix(table(valid_pred$lg, valid_pred$Status))
+
+# AIC best model
+# model_aic <- glm(Status ~ ., data = new_train, family = "binomial")
+# model_aic <- step(model_aic)
+# saveRDS(model_aic, "./model_aic.rds")
+model_aic <- readRDS("./model_aic.rds")
+# these are the dropped variables
+model_aic$anova
+aic_best <- glm(Status ~ TMC + Side + Traffic_Signal + Hour +
+                  Start_Lat + Distance + Wday + Junction + 
+                  Crossing + Duration + Year + Start_Lng + 
+                  Wind_Speed + Pressure + Month + Day + 
+                  Sunrise_Sunset + Astronomical_Twilight + 
+                  Temperature + Weather_Condition + Humidity,
+                data = new_train,
+                family = "binomial")
+valid_pred <- valid %>%
+  mutate("lg" = predict(aic_best, newdata = valid, type = "response")) %>%
+  mutate("lg" = ifelse(lg > 0.5, "Severe", "Not Severe"))
+valid_pred %>% select(Status, lg)
+table(valid$Status)
+confusionMatrix(table(valid_pred$lg, valid_pred$Status))
+```
+
+## (3) Sparse Logistic regression
+```{r cache=TRUE}
+x <- model.matrix(Status ~ ., data = new_train)
+model_total <- glmnet(x, new_train$Status, family = "binomial")
+plot(model_total, xvar = "lambda", label = T)
+model_lambda <- cv.glmnet(x, new_train$Status, family = "binomial")
+plot(model_lambda)
+
+# use the best lambda
+valid_pred <- valid %>%
+  mutate("slg" = predict(model_lambda, 
+                          newx = model.matrix(Status ~ ., data = valid %>% select(-Severity)), 
+                          s = "lambda.min", type = "response")[,1]) %>%
+  mutate("slg" = ifelse(slg > 0.5, "Severe", "Not Severe"))
+valid_pred %>% select(Status, slg)
+table(valid$Status)
+confusionMatrix(table(valid_pred$slg, valid_pred$Status))
+# write_csv(valid_pred, "./results/TX_valid.csv")
+```
+
+## (4) Random forest
+```{r cache=TRUE}
+model <- randomForest(Status ~ ., data = new_train, mtry = 6, ntree = 500)
+
+# see if ntree = 500 is enough
+error_data <- model$err.rate %>%
+  as_tibble() %>%
+  mutate("Trees" = seq_along(OOB)) %>%
+  pivot_longer(cols = 1:3, names_to = "Type", values_to = "Error")
+
+ggplot(error_data, aes(Trees, Error, color = Type)) +
+  geom_line() +
+  labs(x = "Number of Trees",
+       title = "Error Rate")
+
+# try different mtry 
+oob_values <- vector(length = 10)
+for (i in 1:10) {
+  temp_model <- randomForest(Status ~ ., data = new_train, mtry = (i + 5))
+  oob_values[i] <- temp_model$err.rate[nrow(temp_model$err.rate), 1]
+}
+ggplot(tibble("Error" = oob_values), aes(x = 6:15, y = Error)) +
+  geom_line(aes(group = 1)) +
+  labs(x = "Number of Variables",
+       title = "Error VS mtry")
+
+# choose mtry = 13 as the best model
+best_model <- randomForest(Status ~ ., data = new_train, mtry = 13, ntree = 500)
+
+valid_pred_rf <- valid %>%
+  add_predictions(best_model)
+table(valid_pred_rf$Status)
+confusionMatrix(valid_pred_rf$pred, valid_pred_rf$Status)
+```
+
+## (5) Decision tree
+```{r}
+model_decision <- rpart(Status ~ ., data = new_train, method = "class")
+
+valid_pred_dc <- valid %>%
+  mutate(pred = predict(model_decision, valid, type = "class"))
+confusionMatrix(table(valid_pred_dc$pred, valid_pred_dc$Status))
+```
