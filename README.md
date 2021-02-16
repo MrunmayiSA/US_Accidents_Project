@@ -13,3 +13,4 @@ The original data can be accessed on <https://www.kaggle.com/sobhanmoosavi/us-ac
 # Team Members
 Mrunmayi Anchawale, Pavan Choudhari, Maanasa Kaza and Yashvin Jagarlamudi.
 
+[Summary of the Project](https://zhuochenglin.github.io/US_Accidents_Project/)
